@@ -1,0 +1,93 @@
+%\VignetteIndexEntry{User manual}
+\documentclass{article}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{graphics}
+\usepackage{amsmath}
+\usepackage{indentfirst}
+\usepackage[utf8]{inputenc}
+
+\DeclareMathOperator{\var}{var}
+\DeclareMathOperator{\cov}{cov}
+
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+<<PRECISE,include=FALSE,echo=FALSE>>=
+options(keep.source = TRUE, width = 60)
+BANS <- packageDescription("BANS")
+@
+
+\title{\texttt{BANS}:\\ Bayesian Node-wise Selection for Multi-layered Gaussian Graphicl Models}
+\author{Min Jin Ha}
+\maketitle
+
+\section{Overview}
+<<>>=
+library(BANS)
+@
+This vignette describes how to use \texttt{R/BANS} to estimate multi-layered Gaussian Graphical Models using Bayesian node-wise selection.
+
+\section{BANS with an example}
+We illustrate the usage of \texttt{R/BANS} pakcage using The Cancer Genome Atlas (TCGA) mRNA expression and protein expression data for 428 clear cell renel cell carcinoma (ccRCC) patients. The multi-omic data (matched sample in row) corresponding to PI3K pathway can be loaded.
+<<>>=
+data("TCGA_KIRC_CNA_mRNA_RPPA")
+dim(mRNA);dim(RPPA)
+@
+We make an input data by combining mRNA and protein expression datasets.
+<<>>=
+Y = cbind(mRNA,RPPA)
+colnames(Y) = c(paste("mRNA_",colnames(mRNA),sep="")
+,paste("RPPA_",colnames(RPPA),sep=""))
+dim(Y)
+@
+In this way, we set the nodes from 1-10 are for genes corresponding to mRNA expression and 11-24 are for proteins corresponding to protein expression. Using this multi-platform data, we aim to construct two-layered Gaussian graphical models using the \texttt{ch.chaingraph} function. For the input parameters, we fix $\lambda$ (\texttt{lambda}) and $\delta$ (\texttt{delta}) as the shape and scale of the prior on the precision matrix. We also specify the priors on $\gamma$ and $\eta$ in the options \texttt{eta.prob} and \texttt{gamma.prob}. By setting \texttt{burnin.S} and \texttt{inf.S}, we can choose the number of iterations of the MCMC samples for burn-in and inference. Note that in this function, we implemented MCMC sampling to estimate the posterior distributions with the symmetric constraint in the structure of zeros of the precision matrix. Therefore the function should run jointly for a layer. For the first layer that has no upstream layer (e.g. mRNA expression), the Bayesian neighborhood selection for UG is performed by setting \texttt{v.pa=NULL}. For the first layer (mRNA expression), we fit UG.
+<<cache=T>>=
+fit1 = ch.chaingraph(v.ch=1:10,v.pa=NULL,Y=Y,eta.prob=0.1
+                    ,gamma.prob=0.1,lambda=5,delta=2,burnin.S=10,inf.S=20)
+@
+For the sencond layer (protein expression), we fit directed edges from the mRNA expression to protein expression and the residual undirected protein network structure.
+<<cache=T>>=
+fit2 = ch.chaingraph(v.ch=11:24,v.pa=1:10,Y=Y,eta.prob=0.1
+                    ,gamma.prob=0.1,lambda=5,delta=2,burnin.S=10,inf.S=20)
+@
+The output is as follows:
+<<>>=
+names(fit1)
+names(fit2)
+@
+\texttt{Gamma} and \texttt{B} are \texttt{|v.ch|}$\times$\texttt{|v.pa|}$\times$\texttt{inf.S} arrays for the binary indicators $\gamma$ and regression coefficients $b$ for directed edges between mRNA and protein. If it is for the first layer, those arrays are NULL. \texttt{eta} and \text{A} are \texttt{|v.ch|}$\times$\texttt{|v.ch|}$\times$\texttt{inf.S} arrays for the binary indicators $\eta$ and regression coefficients $\alpha$ for undirected edges within layer, and \texttt{kappa} is a \texttt{inf.S}$\times$\texttt{|v.ch|} matrix for the precision parameters.
+\section{BANS-parallel}
+To make BANS node-wise parallelizable, we also implemented node-wise regression learning without the symmetric constraint of the precision matrix. The additional input parameters are lists for node numbers for layers and parent layers. \texttt{chlist} is the length $q$ (number of layers) list with node number information for each layer. \texttt{palist} is also the length $q$ list with node number information for each corresponding parent layers. For the first layer, \texttt{palist} is set to NULL. And \texttt{v} is the node that we want to regress on all the other variables using our BANS model. From BANS-parallel, we estimate undirected edges for the node \texttt{v} within the layer (\texttt{v}$\in\tau$), and directed edges between all nodes in $\tau$ and its parent layers (see the BANS model in proposition 1).
+<<>>=
+v=12
+chlist = list(1:10,11:24)
+palist = list(NULL,1:10)
+vfit = v.chaingraph(v=v,chlist=chlist,palist=palist,Y=Y
+                    ,lambda=5,delta=2,burnin.S=10,inf.S=20)
+names(vfit)
+@
+\texttt{Gamma} and \texttt{B} objects are $|\tau| \times |\texttt{pa}_\tau|\times \texttt{|inf.S|}$ arrays for the directed edges between $\tau$ that includes the node \texttt{v} and its parent layers. \texttt{eta} and \texttt{A} are \texttt{inf.S}$\times |\tau|$ matrices for undirected edges connected to \texttt{v} within the same layer $\tau$.
+
+\section{Posterior Inference on the Signs of Edges }
+To make further inference on the signs/weights of edges, we implemented structured MCMC, conditional on the predetermined multi-layered graphical structure. We first compute posterior marginal probability of edge inclusion for each edge using the results from the structural estimations for all layers.
+<<>>=
+p = ncol(Y)
+B = matrix(0,p,p)
+B[chlist[[1]],chlist[[1]]] = apply(fit1$eta,c(1,2),mean)
+B[chlist[[2]],chlist[[2]]] = apply(fit2$eta,c(1,2),mean)
+B[as.matrix(expand.grid(chlist[[1]],palist[[1]]))] = apply(fit2$Gamma,c(1,2),mean)
+@
+Then, with cutoff of 0.5, we construct the adjacency matrix for the estimated graphical structure and perform structured MCMC as follows.
+<<>>=
+G = 1*(B>0.5)
+t = 1 # first layer
+sfit1 = ch.chaingraph.str(v.ch=chlist[[t]],v.pa=palist[[t]]
+                          ,Y=Y,G=G,lambda=5,delta=2,burnin.S=10,inf.S=20)
+t = 2 # second layer
+sfit2 = ch.chaingraph.str(v.ch=chlist[[t]],v.pa=palist[[t]]
+                          ,Y=Y,G=G,lambda=5,delta=2,burnin.S=10,inf.S=20)
+@
+Using the structured estimation, we can build weighted/signed multi-layered networks.
+\end{document}

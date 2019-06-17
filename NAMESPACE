@@ -1,0 +1,8 @@
+useDynLib(BANS, .registration=TRUE)
+importFrom(Rcpp, evalCpp)
+import(MASS)
+import(Matrix)
+import(rms)
+import(RcppArmadillo)
+import(RcppEigen)
+exportPattern("^[[:alpha:]]+")
